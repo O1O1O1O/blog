@@ -37,12 +37,11 @@ This gives us a pure-SQL UDF like so:
 CREATE TEMP FUNCTION
   hex64ToInt64(hex STRING)
   RETURNS INT64 AS (
-    IF(hex < "8000000000000000", 
-       cast(hex AS INT64), 
-       (SELECT (((ms32 & 0x7fffffff) << 32) | ls32) - 0x7fffffffffffffff - 1 
-        FROM (SELECT cast(concat("0x", substr(hex, 1, 8)) AS INT64) AS ms32, 
-                     cast(concat("0x", substr(hex, 9, 8)) AS INT64) AS ls32)))
-  );
+    IF(hex < "8000000000000000", cast(concat("0x", hex) AS INT64), (
+    SELECT (((ms32 & 0x7fffffff) << 32) | ls32) - 0x7fffffffffffffff - 1
+    FROM (
+      SELECT cast(concat("0x", substr(hex, 1, 8)) AS INT64) AS ms32,
+             cast(concat("0x", substr(hex, 9, 8)) AS INT64) AS ls32))));
 ```
 
 Now we can calculate `select hex64ToInt64("8000000000000000")` which is the most negative signed INT64 number `-9223372036854775808`
