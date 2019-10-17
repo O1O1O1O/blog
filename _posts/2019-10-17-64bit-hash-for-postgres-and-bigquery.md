@@ -12,32 +12,39 @@ Which brings me to a follow post to [64-bit hex number conversion](https://blog.
 ## Why 64-bit numbers gain?
 
 Today I found myself needing a 64-bit hash function to generate something I can use as an identity for some
-potentially very large string columns.  Previously I had been using the BigQuery function [FARM_FINGERPRINT](https://cloud.google.com/bigquery/docs/reference/standard-sql/hash_functions) which
-Google promises is both very fast and a very good hash although it isn't designed to be cryptographically strong
-and is only 64-bits.  However since I'm dealing with tens, if not hundreds of millions of strings the chances of a
-random collision with 64-bits is still vanishingly small (one in billions).
+potentially very large string columns.  Instead of storing the string I store the hash as a 64-bit integer type i.e.
+`BIGINT` on Postgres or `INT64` on BigQuery.  Previously I had been using the BigQuery function [FARM_FINGERPRINT](https://cloud.google.com/bigquery/docs/reference/standard-sql/hash_functions) which
+Google promises is both very fast and [high quality](https://github.com/aappleby/smhasher) hash even though it isn't 
+designed to be cryptographically strong - it is after all "only" 64-bits. Since I'm dealing with collections of tens, 
+to a few hundreds of million of strings the chances of a random collision with 64-bits is still vanishingly small 
+(one in tens of billions). If I was really paranoid I could check an invariant before exporting hashed data to somewhere
+that matters e.g. assert `count(distinct hash(string)) == count(distinct string)`.
     
 ## The problem with Farm fingerprint
 
-The problem with Farm fingerprint is although it is based on the open source [FarmHash](https://github.com/google/farmhash) 
-library it doesn't seem to be widely used elsewhere.  Initially I was only using the hash values internally to
+The problem with Farm fingerprint is although it is based on the [FarmHash](https://github.com/google/farmhash) 
+library which has been open source for several years it doesn't seem to be widely other than in Google products.  Initially I was only using the hash values internally to
 normalize some tables and avoid repeating big long strings.  The data was being computed in BigQuery and exported to
 Postgres and the later didn't really need to know what hash algorithm was being used.
 
 ## Postgres' best alternative?
 
-Since I found myself wanting to also generate these hash values in Postgres but there are no implementations of
+I found myself wanting to also generate these hash values in Postgres but there are no implementations of
 FarmHash for Postgres that I could use. Looking at the [list of hash functions](https://www.postgresql.org/docs/11/pgcrypto.html) 
 we find that MD5 is by far the fastest with 150M hashes/sec on their benchmark system which is 4x the nearest
 competing hash SHA1.
 
 ## 64-bit MD5 in Postgres
 
-For maximum compactness I'd like the id to be just 64-bits which as mentioned above is I believe sufficiently
-unlikely to cause a collision for my data set that I don't care.  After all Google seems happy with 64-bits for
-their farm fingerprint hash which gives a total of 16 billion billion combinations (that's 16 quintillion according
-to [Wikipedia](https://en.wikipedia.org/wiki/Names_of_large_numbers)).  The MD5 function on Postgres outputs a 128-bit
-value in the form of a hex string.  
+MD5 generates a 128-bit value but for maximum compactness I'd like the id to be just 64-bits which as mentioned above
+is I believe sufficiently unlikely to cause a collision for my data set that I don't need to worry about it care. 
+Remember again that I don't have a requirement for a hash secure against forced hash-collision exploits.  Furthermore
+with judicious schema design I can ensure a hash collision at worst would cause a constraint error when inserting
+data, or to cause an string id generated with the hash to resolve to `NULL` instead of the "wrong" string.
+After all Google seems happy with 64-bits for their farm fingerprint hash which gives a total of 16 billion billion
+combinations (that's 16 quintillion according to [Wikipedia](https://en.wikipedia.org/wiki/Names_of_large_numbers)).
+
+The MD5 function on Postgres outputs a 128-bit value in the form of a hex string.  
 
 So if you do:
 ```sql
@@ -93,19 +100,18 @@ With help from past me I can now define a temporary user defined function (UDF) 
 hex string of the first 64-bits of the MD5 and then calls my previously defined 64-bit hex to `int64` conversion
 UDF like so:
 ```sql
-CREATE TEMP FUNCTION
-  hex64_to_int64(hex STRING)
-  RETURNS INT64 AS (
+CREATE TEMP FUNCTION hex64_to_int64(hex STRING)
+RETURNS INT64 AS (
     IF(hex < "8000000000000000", 
        cast(concat("0x", hex) AS INT64), 
        (SELECT (((ms32 & 0x7fffffff) << 32) | ls32) - 0x7fffffffffffffff - 1
         FROM (SELECT cast(concat("0x", substr(hex, 1, 8)) AS INT64) AS ms32,
-                     cast(concat("0x", substr(hex, 9, 8)) AS INT64) AS ls32))));
-CREATE TEMP FUNCTION
-  md5_int64(s STRING)
-  RETURNS INT64 AS (
+                     cast(concat("0x", substr(hex, 9, 8)) AS INT64) AS ls32)))
+);
+CREATE TEMP FUNCTION md5_int64(s STRING)
+RETURNS INT64 AS (
     hex64_to_int64(substr(to_hex(md5(s)),1,16))
-  );
+);
 ```  
 Now I can simply call `select md5_int64("hello, world");` and get back `-1956829753693551919` which is 
 exactly what the Postgres `h_bigint` function returns (phew!).
